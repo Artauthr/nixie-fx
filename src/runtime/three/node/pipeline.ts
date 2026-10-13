@@ -1,6 +1,6 @@
-import { NoToneMapping, type Camera, type Scene } from "three";
+import { NoToneMapping, SRGBColorSpace, type Camera, type Scene } from "three";
 import { RenderPipeline, WebGPURenderer } from "three/webgpu";
-import { pass } from "three/tsl";
+import { context, pass, renderOutput } from "three/tsl";
 import { bloom } from "three/addons/tsl/display/BloomNode.js";
 import { sceneBloomToUnrealBloomParameters } from "../hdrEffectLayer";
 import type { SceneDefinition } from "../../schema/scene";
@@ -57,9 +57,17 @@ export class ThreeNodeRenderPipeline {
     private camera: Camera,
   ) {
     this.scenePass = pass(scene, camera);
+    this.scenePass.contextNode = context({ nfxLegacyCompositing: true });
     const color = this.scenePass.getTextureNode("output");
     this.bloomPass = bloom(color, 1, 0, 1);
-    this.pipeline = new RenderPipeline(renderer, color.add(this.bloomPass));
+    // UnrealBloomPass renders its input with MeshBasicMaterial (display
+    // conversion), then adds the unconverted bloom texture to the canvas.
+    // Converting their sum changes both the glow hue and its strength.
+    this.pipeline = new RenderPipeline(
+      renderer,
+      renderOutput(color, NoToneMapping, SRGBColorSpace).add(this.bloomPass),
+    );
+    this.pipeline.outputColorTransform = false;
   }
   setCamera(camera: Camera): void {
     this.camera = camera;
@@ -68,7 +76,9 @@ export class ThreeNodeRenderPipeline {
   setBloom(settings: SceneDefinition["bloom"]): void {
     const p = sceneBloomToUnrealBloomParameters(settings);
     this.enabled = p.enabled;
-    this.bloomPass.strength.value = p.strength;
+    // UnrealBloomPass r184/r185 includes a 3x legacy intensity factor in
+    // its composite shader; BloomNode does not. Preserve authored intensity.
+    this.bloomPass.strength.value = p.strength * 3;
     this.bloomPass.radius.value = p.radius;
     this.bloomPass.threshold.value = p.threshold;
   }

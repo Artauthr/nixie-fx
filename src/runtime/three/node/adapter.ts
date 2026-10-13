@@ -1,5 +1,10 @@
+import { sampleNodeTexture } from "./textureSample";
 import { BackSide, DoubleSide, FrontSide, type Texture } from "three";
-import { MeshBasicNodeMaterial, MeshStandardNodeMaterial } from "three/webgpu";
+import {
+  MeshBasicNodeMaterial,
+  MeshStandardNodeMaterial,
+  type NodeBuilder,
+} from "three/webgpu";
 import * as T from "three/tsl";
 import {
   resolveParticleDepthWrite,
@@ -162,7 +167,10 @@ function createNodeMaterial(
         `Texture "${path}" is unavailable.`,
       );
     const sample = main
-      ? T.texture(raw(main)!, subUv.xy.add(T.fract(T.uv()).mul(subUv.zw)))
+      ? sampleNodeTexture(
+          raw(main)!,
+          subUv.xy.add(T.fract(T.uv()).mul(subUv.zw)),
+        )
       : T.vec4(1);
     let base: Node4 = nodeLinearColor(sample).mul(nodeLinearColor(particle));
     let emissive: Node4 = T.vec4(0);
@@ -244,9 +252,13 @@ function createNodeMaterial(
     if (material instanceof MeshStandardNodeMaterial)
       material.emissiveNode = emissive.rgb;
     if (graph && graph.colorVersion !== 1) {
-      // Legacy GLSL wrote raw display RGB; cancel the renderer output transfer
-      // after lighting, preserving that versioned convention (including HDR).
-      material.outputNode = T.vec4(nodeLinearColor(T.output).rgb, T.output.a);
+      // Legacy GLSL writes raw graph values into the HDR target. Decoding
+      // each translucent particle before blending changes overlaps and bloom.
+      material.outputNode = T.Fn((_: unknown, builder: NodeBuilder) =>
+        builder.getContext().nfxLegacyCompositing
+          ? T.output
+          : T.vec4(nodeLinearColor(T.output).rgb, T.output.a),
+      )();
     }
     return {
       material,

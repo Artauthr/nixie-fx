@@ -1,3 +1,6 @@
+import { PerspectiveCamera, Scene, Vector2 } from "three";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { createDefaultSceneBloom } from "../../schema/scene";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const state = vi.hoisted(() => ({
   init: () => Promise.resolve(),
@@ -25,6 +28,7 @@ vi.mock("three/webgpu", async (original) => ({
   },
 }));
 import {
+  ThreeNodeRenderPipeline,
   beginThreeWebGpuFrame,
   createThreeWebGpuRenderer,
   disposeThreeWebGpuRenderer,
@@ -74,5 +78,44 @@ describe("host-owned renderer lifecycle", () => {
       "Adapter unavailable",
     );
     expect(state.disposed).toHaveBeenCalledOnce();
+  });
+});
+
+describe("legacy bloom compatibility", () => {
+  it("preserves UnrealBloomPass's composite intensity without converting the glow", async () => {
+    const legacy = new UnrealBloomPass(new Vector2(32, 32), 1, 0, 1);
+    expect(legacy.compositeMaterial.fragmentShader).toContain(
+      "3.0 * bloomStrength",
+    );
+    const { renderer } = await createThreeWebGpuRenderer();
+    const pipeline = new ThreeNodeRenderPipeline(
+      renderer,
+      new Scene(),
+      new PerspectiveCamera(),
+    );
+    const internals = pipeline as unknown as {
+      bloomPass: {
+        strength: { value: number };
+        threshold: { value: number };
+        radius: { value: number };
+      };
+      pipeline: { outputColorTransform: boolean };
+    };
+    pipeline.setBloom({
+      ...createDefaultSceneBloom(),
+      enabled: true,
+      intensity: 4,
+      threshold: 1.2,
+      scatter: 0.7,
+    });
+    expect(internals.bloomPass.strength.value).toBe(3);
+    expect(internals.bloomPass.threshold.value).toBe(1.2);
+    expect(internals.bloomPass.radius.value).toBe(0.7);
+    expect(internals.pipeline.outputColorTransform).toBe(false);
+    pipeline.setBloom({ ...createDefaultSceneBloom(), intensity: 2 });
+    expect(internals.bloomPass.strength.value).toBe(1.5);
+    pipeline.dispose();
+    legacy.dispose();
+    disposeThreeWebGpuRenderer(renderer);
   });
 });

@@ -1,3 +1,4 @@
+import { sampleNodeTexture } from "./textureSample";
 import * as T from "three/tsl";
 import type { Node, UniformNode } from "three/webgpu";
 import type { Texture } from "three";
@@ -76,7 +77,7 @@ export function compileThreeNodeGraph(
     graph.colorVersion === 1 ? nodeLinearColor(v) : v;
   const main = (uv: Node<"vec2">) =>
     inputs.mainTexture
-      ? T.texture(
+      ? sampleNodeTexture(
           inputs.mainTexture,
           inputs.subUv.xy.add(T.fract(uv).mul(inputs.subUv.zw)),
         )
@@ -133,7 +134,7 @@ export function compileThreeNodeGraph(
           node.id,
           `Texture "${binding.path}" is unavailable.`,
         );
-      return T.texture(tex, T.fract(uv()));
+      return sampleNodeTexture(tex, T.fract(uv()));
     };
     const a = (fallback = 0) => input("a", T.vec4(num("a", fallback)));
     const b = (fallback = 0) => input("b", T.vec4(num("b", fallback)));
@@ -235,7 +236,7 @@ export function compileThreeNodeGraph(
             .div(tiles);
           value = T.mix(
             value,
-            T.texture(inputs.mainTexture, next),
+            sampleNodeTexture(inputs.mainTexture, next),
             inputs.particleColor.a.clamp(),
           );
         }

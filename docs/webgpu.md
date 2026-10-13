@@ -50,7 +50,7 @@ recreate resources on Retry or explicitly choose legacy WebGL.
 
 “Implemented” describes the available path, not visual approval on every device.
 Native r184 and forced fallback r184 have headed desktop compilation smoke;
-physical iOS/Android and measured visual tolerances remain pending human review.
+physical iOS/Android and broader visual approval remain pending human review.
 
 | Feature | Legacy WebGL | Native WebGPU | Three WebGL2 fallback |
 |---|---|---|---|
@@ -102,9 +102,48 @@ These are review criteria, not measured tolerance claims: no missing features or
 frames, exact CPU transforms/counts at matched steps, no flipped normals, and no
 unexpected opaque/transparent changes are acceptable. Inspect highlight and glow
 regions separately; if the reviewer requires numeric image error bounds, those
-remain unmeasured and must be established before acceptance. Static bake-tier
+remain unmeasured outside the focused fire check below. Static bake-tier
 noise versus live shader noise also needs feature-specific review. Do not claim
 bounded parity merely because shaders compile.
+
+## Legacy fire compatibility check
+
+A headed desktop comparison on 2026-10-13 used a real authored fire project,
+without editing its effects, textures, graphs or settings. The checkpoint was seed
+1234, time 2s, a 512 × 512 drawing buffer at DPR 1, orthographic bounds ±5,
+camera (0,3,20) looking at (0,3,0), with the floor grid excluded. Bloom was enabled
+with intensity 4, threshold 1, exposure 0 and scatter 0.7. CPU playback was paused.
+The comparison used temporary framebuffer readbacks; no images or private assets
+are included in this repository, and the probes were removed afterward.
+
+The fixes preserve three legacy contracts:
+
+- Old graphs write raw color into the HDR scene target. Converting individual
+  translucent particles before blending changes overlap colors and bloom.
+- The legacy screen path display-converts the scene first, then adds raw bloom.
+  UnrealBloomPass also includes a 3× composite intensity factor absent from
+  BloomNode. The node pipeline matches both operations without changing settings.
+- LinearFilter/NearestFilter textures must sample level zero even when generated
+  mip levels exist. Explicit level-zero node sampling avoids WebGPU choosing
+  coarse mips across wrapped/distorted UV seams; mipmap filters retain normal LOD.
+
+The original and current legacy WebGL checkpoint had identical RGBA checksum
+428908907. Lit on/off with equal effective bloom settings produced the same
+checkpoint on each backend. Thus this controlled case did not reproduce the
+reported WebGL Lit-toggle regression; it does not explain every prior screenshot.
+
+After the fixes, WebGPU versus legacy WebGL had mean absolute RGB error
+0.3475/255 over the frame and 1.8413/255 over colored pixels (RGB channel range
+above 8 in either frame). 1.7302% of RGB channels differed by more than 3/255;
+the maximum channel error was 37/255. The composite bloom texture differed by
+at most 0.004883 in linear HDR units. These are observations for one checkpoint,
+not universal acceptance bounds. Edge/filtering differences remain, and other
+materials, no-bloom rendering, fallback and physical devices need separate review.
+
+Compatibility references: Three r184
+[UnrealBloomPass](https://github.com/mrdoob/three.js/blob/r184/examples/jsm/postprocessing/UnrealBloomPass.js),
+[BloomNode](https://github.com/mrdoob/three.js/blob/r184/examples/jsm/tsl/display/BloomNode.js),
+and [WebGPU sampler setup](https://github.com/mrdoob/three.js/blob/r184/src/renderers/webgpu/utils/WebGPUTextureUtils.js).
 
 ## Tested versions and limits
 
