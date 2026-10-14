@@ -1,3 +1,4 @@
+import { sampleTrailMaterials } from "./trailMaterialPixelSmoke.test-support";
 import { sampleMultipleTextures } from "./multiTexturePixelSmoke.test-support";
 import { Application, Rectangle, Texture } from "pixi.js";
 import { normalizeShaderGraph } from "../../src/runtime/schema/materials";
@@ -13,6 +14,7 @@ interface Tier2PixelSmokeResult {
   tier2VisibleParticles: number;
   differs: boolean;
   error?: string;
+  trails?: Awaited<ReturnType<typeof sampleTrailMaterials>>;
   multiTexture?: Awaited<ReturnType<typeof sampleMultipleTextures>>;
 }
 
@@ -237,6 +239,7 @@ async function run(): Promise<void> {
   const multiTexture = await sampleMultipleTextures();
   window.__tier2PixelResult = {
     multiTexture,
+    trails: await sampleTrailMaterials(),
     plainColorSum: plain.colorSum,
     plainAlphaSum: plain.alphaSum,
     plainVisibleParticles: plain.visibleParticles,

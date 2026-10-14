@@ -1,3 +1,4 @@
+import { PixiTrailMesh, type TrailPoint } from "./trailMesh";
 import { sampleIndependentTrailColor } from "../trailColor";
 import {
   particleRoll,
@@ -145,6 +146,8 @@ interface EmitterView extends PixiVfxEmitterRenderView {
   trailContainer: ParticleContainer;
   trailTexture: Texture;
   trailPool: Particle[];
+  trailMesh: PixiTrailMesh | null;
+  trailMaterial: ResolvedTrailMaterial | null;
   bloomContainer: ParticleContainer;
   bloomPool: Particle[];
   trailHistories: Map<string, TrailHistory>;
@@ -194,6 +197,8 @@ interface ParticleRenderSample {
   tint: number;
   alpha: number;
   baseAlpha: number;
+  trailTint: number;
+  trailAlpha: number;
   hdrColor: Vec3;
   emissiveStrength: number;
   texture: Texture;
@@ -202,21 +207,6 @@ interface ParticleRenderSample {
   normalizedAge: number;
   loopAge: number;
   speed: number;
-  seed: number;
-}
-
-interface TrailPoint {
-  x: number;
-  y: number;
-  timeSeconds: number;
-  /** Seconds this point persists before fully fading out / being pruned. */
-  lifetimeSeconds: number;
-  distanceFromHead: number;
-  pixelSize: number;
-  tint: number;
-  alpha: number;
-  widthPx: number;
-  maxLengthPx?: number;
   seed: number;
 }
 
@@ -231,6 +221,15 @@ interface EmitterDrawResult {
   bloomSourceParticles: number;
 }
 
+interface ResolvedTrailMaterial {
+  key: string;
+  texture: Texture;
+  shaderOptions: ResolvedTier2MaterialRender | null;
+  block: PixiVfxMaterialRenderBlock | null;
+  blend: EffectiveParticleBlend;
+  missingTextures: VfxTextureAssetRef[];
+}
+
 interface ResolvedEmitterRender {
   key: string;
   texture: Texture;
@@ -241,6 +240,7 @@ interface ResolvedEmitterRender {
   materialUv: MaterialAnimatedUvDescriptor | null;
   materialBlock: PixiVfxMaterialRenderBlock | null;
   tier2Material: ResolvedTier2MaterialRender | null;
+  trailMaterial: ResolvedTrailMaterial | null;
   dynamicUvs: boolean;
   effectiveBlend: EffectiveParticleBlend;
   materialRenderFace?: MaterialRenderFace;
@@ -837,6 +837,24 @@ export class PixiVfxEffectInstance {
             "Material Render Faces has no effect in the Pixi flat-particle backend; use the Three 3D/world backend for front/back face culling.",
         });
       }
+      if (render.trailMaterial) {
+        missingTextureRefs.push(...render.trailMaterial.missingTextures);
+        const missing = materialRenderBlockMissingRef(
+          render.trailMaterial.block,
+        );
+        if (missing) missingMaterialRefs.push(missing);
+        const unsupported = materialRenderBlockUnsupportedFeature(
+          render.trailMaterial.block,
+          emitter,
+          i,
+        );
+        if (unsupported)
+          materialUnsupportedFeatures.push({
+            ...unsupported,
+            featureKey: "advanced.trails.material",
+            path: `emitters.${i}.advanced.trails.material`,
+          });
+      }
       const existing = this.emitterViews[i];
       if (existing?.key === render.key) {
         // The render key does not cover the Tier-1 fold, so refresh it here:
@@ -853,10 +871,22 @@ export class PixiVfxEffectInstance {
         render.tier2Material,
         render.texture,
       );
-      const trailMaterialShader = createEmitterTier2MaterialShader(
-        render.tier2Material,
-        render.trailTexture,
-      );
+      const trailMaterialShader = render.trailMaterial?.shaderOptions
+        ? createTier2ParticleMaterialShader({
+            ...render.trailMaterial.shaderOptions,
+            texture: render.trailMaterial.texture,
+            trailMesh: true,
+          })
+        : render.trailMaterial
+          ? null
+          : createEmitterTier2MaterialShader(
+              render.tier2Material,
+              render.trailTexture,
+            );
+      const trailMesh =
+        trailMaterialShader && render.trailMaterial
+          ? new PixiTrailMesh(trailMaterialShader, render.trailMaterial.blend)
+          : null;
       const bloomMaterialShader = createEmitterTier2MaterialShader(
         render.tier2Material,
         render.texture,
@@ -875,7 +905,9 @@ export class PixiVfxEffectInstance {
       });
       const trailContainer = new ParticleContainer({
         texture: render.trailTexture,
-        shader: trailMaterialShader ?? undefined,
+        shader: render.trailMaterial
+          ? undefined
+          : (trailMaterialShader ?? undefined),
         dynamicProperties: {
           vertex: true,
           position: true,
@@ -898,7 +930,7 @@ export class PixiVfxEffectInstance {
         boundsArea: this.boundsArea,
       });
       bloomContainer.blendMode = "add";
-      this.root.addChild(trailContainer);
+      this.root.addChild(trailMesh?.mesh ?? trailContainer);
       this.root.addChild(container);
       this.bloomRoot.addChild(bloomContainer);
       // Static-asset hosts pre-allocate the authored steady-state pool once, so
@@ -934,6 +966,8 @@ export class PixiVfxEffectInstance {
         trailContainer,
         trailTexture: render.trailTexture,
         trailPool: [],
+        trailMesh,
+        trailMaterial: render.trailMaterial,
         bloomContainer,
         bloomPool: [],
         trailHistories: new Map(),
@@ -981,7 +1015,10 @@ export class PixiVfxEffectInstance {
     for (const { index } of order) {
       const view = this.emitterViews[index];
       if (!view) continue;
-      this.root.setChildIndex(view.trailContainer, childIndex++);
+      this.root.setChildIndex(
+        view.trailMesh?.mesh ?? view.trailContainer,
+        childIndex++,
+      );
       this.root.setChildIndex(view.container, childIndex++);
     }
   }
@@ -1200,6 +1237,7 @@ export class PixiVfxEffectInstance {
         missingTrailRef = trailRef;
       }
     }
+    const trailMaterial = this.resolveTrailMaterial(emitter);
     let frameTextures = frames.textures;
     let ownedFrameTextures = [...frames.ownedTextures];
     let animatedUvFrames: AnimatedUvFrameTexture[] = [];
@@ -1220,7 +1258,7 @@ export class PixiVfxEffectInstance {
         ...samplerKeys,
         materialBlendKey,
         materialUvKey,
-        trailKey,
+        trailMaterial?.key ?? trailKey,
       ]
         .filter(Boolean)
         .join("|"),
@@ -1233,12 +1271,86 @@ export class PixiVfxEffectInstance {
       materialUv,
       materialBlock,
       tier2Material,
+      trailMaterial,
       dynamicUvs:
         !materialBlock && (frameTextures.length > 1 || materialUv != null),
       effectiveBlend,
       materialRenderFace: resolvedMaterial?.graph?.side ?? "double",
       missingRef,
       missingTrailRef,
+    };
+  }
+
+  private resolveTrailMaterial(
+    emitter: ParticleEmitterDefinition,
+  ): ResolvedTrailMaterial | null {
+    const instance = emitter.modules.trails
+      ? emitter.advanced.trails.material
+      : null;
+    if (!instance) return null;
+    const trailEmitter = {
+      ...emitter,
+      render: { ...emitter.render, material: instance },
+    };
+    const resolved = this.resolveEmitterMaterial(trailEmitter, null);
+    const graph = resolved?.graph;
+    const artifact = resolved?.artifact;
+    const missingTextures: VfxTextureAssetRef[] = [];
+    const samplerTextures = new Map<string, Texture>();
+    const textureKeys: string[] = [];
+    const getTexture = (path: string): Texture => {
+      const ref = createPixiVfxTextureRef(path);
+      const texture = this.textureProvider?.getTexture(ref);
+      if (!texture) missingTextures.push(ref);
+      textureKeys.push(`${path}:${texture?.uid}:${texture?.source.uid}`);
+      return texture ?? Texture.WHITE;
+    };
+    const path =
+      resolveEffectiveMainTexPath(graph ?? undefined, instance) ||
+      emitter.advanced.trails.texture;
+    const texture = path ? getTexture(path) : Texture.WHITE;
+    let block = resolved?.block ?? null;
+    if (graph && artifact) {
+      let paths = this.materialSamplerPaths.get(artifact);
+      if (!paths) {
+        const compiled = createMaterialPreviewFragment({
+          graph,
+          instance,
+          artifact,
+        });
+        paths = [
+          ...new Set(compiled?.samplers.map((binding) => binding.path) ?? []),
+        ];
+        this.materialSamplerPaths.set(artifact, paths);
+      }
+      for (const path of paths) samplerTextures.set(path, getTexture(path));
+      if (
+        artifact.tier === "tier3-defer" ||
+        (artifact.tier === "tier2-shader" &&
+          !canRenderTier2ParticleContainerShader(artifact))
+      ) {
+        block = createUnsupportedTier2MaterialBlock(
+          instance.shaderId,
+          artifact,
+        );
+      }
+    }
+    return {
+      key: `trail-material:${graph ? materialDigest(graph, instance, texture.uid) : instance.shaderId}:${textureKeys.join("|")}:${materialRenderBlockKey(block)}`,
+      texture,
+      block,
+      blend: resolveEffectiveParticleBlend("alpha", artifact?.blend),
+      missingTextures,
+      shaderOptions:
+        !block && graph && artifact
+          ? {
+              graph,
+              instance,
+              artifact,
+              textureSheetTiles: [1, 1],
+              samplerTextures,
+            }
+          : null,
     };
   }
 
@@ -1770,7 +1882,7 @@ function drawEmitterView(
         ? "add"
         : "normal";
   view.trailContainer.blendMode = view.container.blendMode;
-  if (view.materialBlock) {
+  if (view.materialBlock && !view.trailMaterial) {
     clearEmitterView(view);
     state.uploadBytesLastFrame = 0;
     view.drawResult.visibleParticles = 0;
@@ -1821,8 +1933,11 @@ function drawEmitterView(
       sample,
       debugQuadPool,
     );
-    if (!sample.visible) continue;
-    updateTrailHistory(view, emitter, sample, timeSeconds);
+    if (view.trailMaterial)
+      updateTrailHistory(view, emitter, sample, timeSeconds);
+    if (!sample.visible || view.materialBlock) continue;
+    if (!view.trailMaterial)
+      updateTrailHistory(view, emitter, sample, timeSeconds);
     if (bloom.enabled && sample.emissiveStrength > bloom.threshold) {
       const bloomParticle =
         view.bloomPool[bloomSourceCount] ?? createParticle(sample.texture);
@@ -2334,6 +2449,12 @@ function updateParticle(
   sample.tint = tint;
   sample.alpha = particle.alpha;
   sample.baseAlpha = baseAlpha;
+  sample.trailTint = rgbToTint(
+    initColor[0] * intensity * overLife[0],
+    initColor[1] * intensity * overLife[1],
+    initColor[2] * intensity * overLife[2],
+  );
+  sample.trailAlpha = clamp(initColor[3] * overLife[3], 0, 1);
   sample.hdrColor = hdrColor;
   sample.emissiveStrength = peak;
   sample.texture = texture;
@@ -2437,8 +2558,9 @@ function updateTrailHistory(
       lifetimeSeconds,
       distanceFromHead: 0,
       pixelSize: sample.pixelSize,
-      tint: sample.tint,
-      alpha: sample.alpha,
+      tint: view.trailMaterial ? sample.trailTint : sample.tint,
+      alpha: view.trailMaterial ? sample.trailAlpha : sample.alpha,
+      pixelsPerWorldUnit: sample.pixelsPerWorldUnit,
       widthPx,
       maxLengthPx,
       seed: sample.seed,
@@ -2449,8 +2571,9 @@ function updateTrailHistory(
     last.timeSeconds = timeSeconds;
     last.lifetimeSeconds = lifetimeSeconds;
     last.pixelSize = sample.pixelSize;
-    last.tint = sample.tint;
-    last.alpha = sample.alpha;
+    last.tint = view.trailMaterial ? sample.trailTint : sample.tint;
+    last.alpha = view.trailMaterial ? sample.trailAlpha : sample.alpha;
+    last.pixelsPerWorldUnit = sample.pixelsPerWorldUnit;
     last.widthPx = widthPx;
     last.maxLengthPx = maxLengthPx;
     last.seed = sample.seed;
@@ -2509,9 +2632,17 @@ function drawTrailView(
 ): number {
   if (!emitter.modules.trails) {
     view.trailHistories.clear();
+    if (view.trailMesh) view.trailMesh.mesh.visible = false;
     view.trailContainer.particleChildren.length = 0;
     view.trailContainer.update();
     return 0;
+  }
+  if (view.trailMaterial) {
+    for (const [key, history] of view.trailHistories) {
+      pruneTrailPoints(history.points, undefined, timeSeconds);
+      if (!history.points.length) view.trailHistories.delete(key);
+    }
+    return view.trailMesh?.draw(view.trailHistories, emitter, timeSeconds) ?? 0;
   }
   const settings = emitter.advanced.trails;
   const trailColor: Vec4 = [1, 1, 1, 1];
@@ -3054,6 +3185,7 @@ function particleProjectedAlignmentScale(
 }
 
 function clearEmitterView(view: EmitterView): void {
+  if (view.trailMesh) view.trailMesh.mesh.visible = false;
   view.container.particleChildren.length = 0;
   view.trailContainer.particleChildren.length = 0;
   view.bloomContainer.particleChildren.length = 0;
@@ -3069,7 +3201,8 @@ function destroyEmitterView(
   view: EmitterView,
 ): void {
   root.removeChild(view.container);
-  root.removeChild(view.trailContainer);
+  root.removeChild(view.trailMesh?.mesh ?? view.trailContainer);
+  view.trailMesh?.destroy();
   bloomRoot.removeChild(view.bloomContainer);
   view.container.destroy();
   view.trailContainer.destroy();
@@ -3520,6 +3653,8 @@ function createParticleDrawScratch(texture: Texture): ParticleDrawScratch {
       tint: 0xffffff,
       alpha: 1,
       baseAlpha: 1,
+      trailTint: 0xffffff,
+      trailAlpha: 1,
       hdrColor: [0, 0, 0],
       emissiveStrength: 0,
       texture,
