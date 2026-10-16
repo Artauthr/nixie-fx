@@ -33,6 +33,8 @@ export {
  */
 
 export interface Tier2ParticleMaterialShaderOptions {
+  /** Internal ribbon path uses mesh attributes and evaluates every supported tier. */
+  trailMesh?: boolean;
   graph: ShaderGraph;
   instance: MaterialInstance;
   artifact: MaterialArtifact;
@@ -90,14 +92,31 @@ export function createTier2ParticleMaterialShader({
   texture,
   textureSheetTiles,
   samplerTextures,
+  trailMesh = false,
 }: Tier2ParticleMaterialShaderOptions): PixiShader | null {
-  if (!canRenderTier2ParticleContainerShader(artifact)) return null;
+  if (!trailMesh && !canRenderTier2ParticleContainerShader(artifact))
+    return null;
+  // Ribbons execute the full graph, including constants normally folded into
+  // Tier-1 color or Tier-0 textures. Do not multiply those values twice.
+  if (trailMesh) artifact = { ...artifact, fixed: undefined };
   const compiled = createMaterialPreviewFragment({ artifact, graph, instance });
   if (!compiled) return null;
-  const fragment =
+  let fragment =
     graph.colorVersion === 1
       ? `#define PREMULTIPLIED_ALPHA\n#define uTexture uGraphTexture\n${compiled.fragment}`
       : compiled.fragment;
+  if (trailMesh) {
+    // Trail fading is independent of whether the graph consumes ParticleColor.
+    fragment = fragment
+      .replace("void main(void)", "varying float vTrailFade;\nvoid main(void)")
+      .replace(
+        /gl_FragColor = ([^;]+);/g,
+        graph.blend === "opaque" || graph.blend === "masked"
+          ? "if (vTrailFade <= 0.01) discard; gl_FragColor = $1;"
+          : "gl_FragColor = $1 * vTrailFade;",
+      );
+  }
+  const vertex = trailMesh ? TRAIL_VERTEX_SHADER : PARTICLE_VERTEX_SHADER;
   const fixed = artifact.fixed ?? defaultFixed(graph.blend);
   const tiles: [number, number] = [
     Math.max(1, Math.round(textureSheetTiles?.[0] ?? 1)),
@@ -116,11 +135,11 @@ export function createTier2ParticleMaterialShader({
     gl: {
       vertex:
         graph.colorVersion === 1
-          ? PARTICLE_VERTEX_SHADER.replace(
+          ? vertex.replace(
               "vec4(aColor.rgb * aColor.a, aColor.a) * uColor",
               "aColor * vec4(uColor.a > 0.0 ? uColor.rgb / uColor.a : vec3(0.0), uColor.a)",
             )
-          : PARTICLE_VERTEX_SHADER,
+          : vertex,
       fragment,
       name: `vfx-tier2-${artifact.shaderId}`,
     },
@@ -131,12 +150,19 @@ export function createTier2ParticleMaterialShader({
       ...(graph.colorVersion === 1 ? { uGraphTexture: mainSource } : {}),
       uSampler: mainSource.style,
       ...perNodeSamplers,
-      uniforms: {
-        uTranslationMatrix: { value: new Matrix(), type: "mat3x3<f32>" },
-        uColor: { value: new Float32Array([1, 1, 1, 1]), type: "vec4<f32>" },
-        uRound: { value: 1, type: "f32" },
-        uResolution: { value: [0, 0], type: "vec2<f32>" },
-      },
+      ...(!trailMesh
+        ? {
+            uniforms: {
+              uTranslationMatrix: { value: new Matrix(), type: "mat3x3<f32>" },
+              uColor: {
+                value: new Float32Array([1, 1, 1, 1]),
+                type: "vec4<f32>",
+              },
+              uRound: { value: 1, type: "f32" },
+              uResolution: { value: [0, 0], type: "vec2<f32>" },
+            },
+          }
+        : {}),
       materialUniforms: {
         uTime: { value: 0, type: "f32" },
         uFixedTint: {
@@ -154,7 +180,7 @@ export function createTier2ParticleMaterialShader({
           value: new Float32Array([0, 0, 1, 1]),
           type: "vec4<f32>",
         },
-        uSubUvFromAttr: { value: 1, type: "f32" },
+        uSubUvFromAttr: { value: trailMesh ? 0 : 1, type: "f32" },
         uDynamicParams: {
           value: new Float32Array([0, 0, 0, 0]),
           type: "vec4<f32>",
@@ -198,3 +224,25 @@ function defaultFixed(
     blend,
   };
 }
+
+const TRAIL_VERTEX_SHADER = `
+attribute vec2 aPosition;
+attribute vec2 aUV;
+attribute vec4 aColor;
+attribute float aTrailFade;
+uniform mat3 uProjectionMatrix;
+uniform mat3 uWorldTransformMatrix;
+uniform mat3 uTransformMatrix;
+uniform vec4 uColor;
+uniform vec4 uWorldColorAlpha;
+varying vec2 vUV;
+varying vec4 vColor;
+varying float vTrailFade;
+void main(void) {
+  gl_Position = vec4((uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix * vec3(aPosition, 1.0)).xy, 0.0, 1.0);
+  vUV = aUV;
+  vColor = vec4(aColor.rgb * aColor.a, aColor.a) * uColor;
+  vColor *= uWorldColorAlpha;
+  vTrailFade = aTrailFade;
+}
+`;

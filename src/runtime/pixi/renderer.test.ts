@@ -1,5 +1,6 @@
 import {
   CanvasSource,
+  Mesh,
   Container,
   DOMAdapter,
   Particle,
@@ -1256,6 +1257,122 @@ describe("Pixi VFX runtime renderer", () => {
     instance.destroy();
   });
 
+  it("batches assigned trail materials into an independent continuous ribbon", () => {
+    withFakePixiDomAdapter(() => {
+      const graph = normalizeShaderGraph({
+        id: "trail-only",
+        blend: "add",
+        colorVersion: 1,
+        nodes: [
+          { id: "color", type: "constant", params: { value: [0, 1, 0, 1] } },
+        ],
+        edges: [
+          {
+            id: "base",
+            source: "color",
+            sourceHandle: "Out",
+            target: "out",
+            targetHandle: "baseColor",
+          },
+        ],
+        outputs: { baseColor: "base" },
+      });
+      const material = createMaterialInstance(graph, "trail-instance");
+      const effect = normalizePixiVfxEffect(
+        trailEffect({ material, inheritColor: false }),
+      );
+      effect.emitters[0]!.render.blend = "alpha";
+      const instance = new PixiVfxEffectInstance({
+        effect,
+        materialGraphProvider: () => graph,
+        fallbackTextures: testFallbackTextures(),
+        projection: createPixiVfx2dProjection({ pixelsPerUnit: 100 }),
+        seed: 7,
+      });
+      for (let i = 1; i <= 10; i++) instance.update(1 / 60, i / 60);
+      const ribbon = instance.root.children[0] as Mesh;
+      expect(ribbon).toBeInstanceOf(Mesh);
+      expect(ribbon.blendMode).toBe("add");
+      expect((instance.root.children[1] as ParticleContainer).blendMode).toBe(
+        "normal",
+      );
+      expect(ribbon.visible).toBe(true);
+      const uvs = ribbon.geometry.getBuffer("aUV").data;
+      expect(uvs[0]).toBeCloseTo(1);
+      expect(uvs[4]).toBeLessThan(uvs[0]!);
+      expect(uvs[4]).toBeGreaterThan(0);
+      expect(ribbon.geometry.indexBuffer!.data.length).toBeGreaterThan(6);
+      expect(instance.stats.renderGroupsLastFrame).toBe(2);
+      expect(
+        ribbon.shader!.resources.materialUniforms.uniforms.uTime,
+      ).toBeCloseTo(10 / 60);
+      const positions = ribbon.geometry.getBuffer("aPosition").data;
+      instance.update(1 / 60, 11 / 60);
+      expect(ribbon.geometry.getBuffer("aPosition").data).toBe(positions);
+      instance.destroy();
+      expect(ribbon.destroyed).toBe(true);
+    });
+  });
+
+  it("keeps trail colors and visibility independent of particle material tint and opacity", () => {
+    withFakePixiDomAdapter(() => {
+      const graph = normalizeShaderGraph({
+        id: "trail-white",
+        colorVersion: 1,
+        blend: "normal",
+      });
+      const effect = normalizePixiVfxEffect(
+        trailEffect({
+          material: createMaterialInstance(graph, "trail"),
+          inheritColor: true,
+        }),
+      );
+      effect.emitters[0]!.render.material = {
+        id: "particle-red",
+        shaderId: "sprite-master",
+        paramOverrides: { Tint: [1, 0, 0, 0] },
+        mainTex: null,
+      };
+      const instance = new PixiVfxEffectInstance({
+        effect,
+        materialGraphProvider: () => graph,
+        fallbackTextures: testFallbackTextures(),
+        projection: createPixiVfx2dProjection({ pixelsPerUnit: 100 }),
+        seed: 7,
+      });
+      for (let i = 1; i <= 10; i++) instance.update(1 / 60, i / 60);
+      const ribbon = instance.root.children[0] as Mesh;
+      expect(ribbon.visible).toBe(true);
+      expect(
+        (instance.root.children[1] as ParticleContainer).particleChildren,
+      ).toHaveLength(0);
+      expect(
+        Array.from(ribbon.geometry.getBuffer("aColor").data.slice(0, 4)),
+      ).toEqual([1, 1, 1, 1]);
+      instance.destroy();
+    });
+  });
+
+  it("reports a missing trail graph without hiding particles or borrowing their shader", () => {
+    const material = {
+      id: "missing-trail",
+      shaderId: "missing-graph",
+      paramOverrides: {},
+      mainTex: null,
+    };
+    const instance = new PixiVfxEffectInstance({
+      effect: trailEffect({ material }),
+      fallbackTextures: testFallbackTextures(),
+      projection: createPixiVfx2dProjection({ pixelsPerUnit: 100 }),
+      seed: 7,
+    });
+    for (let i = 1; i <= 4; i++) instance.update(1 / 60, i / 60);
+    expect(instance.stats.missingMaterialRefs).toContain("missing-graph");
+    expect(firstParticle(instance).alpha).toBeGreaterThan(0);
+    expect(trailParticleCount(instance)).toBe(0);
+    instance.destroy();
+  });
+
   it("renders persistent trail particles from particle history", () => {
     const instance = new PixiVfxEffectInstance({
       effect: trailEffect(),
@@ -2159,6 +2276,7 @@ describe("Pixi VFX runtime renderer", () => {
         tier2VisibleParticles: number;
         differs: boolean;
         error?: string;
+        trails: { count: number; red: number; green: number; indices: number };
         multiTexture: {
           readbacks: number;
           results: {
@@ -2187,6 +2305,10 @@ describe("Pixi VFX runtime renderer", () => {
         });
       }
       expect(pixels.multiTexture.readbacks).toBe(0);
+      expect(pixels.trails.count).toBeGreaterThan(100);
+      expect(pixels.trails.indices).toBeGreaterThan(6);
+      expect(pixels.trails.red).toBeCloseTo(127.5, -1);
+      expect(pixels.trails.green).toBeCloseTo(63.75, -1);
       expect(pixels.tier2ColorSum).not.toBe(pixels.plainColorSum);
     } finally {
       await browser.close();
