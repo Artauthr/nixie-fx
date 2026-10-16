@@ -4,17 +4,15 @@ This is a standalone Vite/Three app using normal `nixie-fx` package exports. It
 loads a normal exported manifest, effects, material graphs, textures and geometry;
 it has no editor imports. The scene file is an exported authoring asset.
 
-From the runtime repository on `codex/2215-webgpu-materials`:
+From this directory, use the released runtime:
 
 ```sh
-npm ci
-mkdir -p ../.local-packages
-npm pack --pack-destination ../.local-packages
-cd examples/webgpu
 npm install
-npm install --no-save --package-lock=false ../../../.local-packages/nixie-fx-0.1.20.tgz
 npm run dev
 ```
+
+For coordinated development, build and pack the runtime repository and install
+that tarball locally without committing a file dependency.
 
 Open `http://127.0.0.1:8085/`. Choose WebGPU or **Three WebGL2 fallback (forced)**.
 The active backend is explicit. Use **Checkpoint 1.5s** (seed 1234) for a paused
